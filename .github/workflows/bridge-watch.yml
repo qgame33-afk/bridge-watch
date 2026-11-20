@@ -1,11 +1,14 @@
 name: Bridge watch
 
-# Checks ship positions every 10 minutes and schedules an ntfy alert for any
+# Checks ship positions every 10 minutes and sends a phone alert for any
 # large ship about an hour from the Ambassador Bridge.
 #
-# Needs two repository secrets (Settings > Secrets and variables > Actions):
-#   AISSTREAM_API_KEY  the free key from aisstream.io
-#   NTFY_TOPIC         the ntfy topic the phone is subscribed to
+# Repository secrets (Settings > Secrets and variables > Actions):
+#   AISSTREAM_API_KEY   the free key from aisstream.io
+#   TELEGRAM_BOT_TOKEN  the Telegram bot that sends the alerts (Vessel Agent)
+#   TELEGRAM_CHAT_ID    the Telegram chat the alerts go to
+#   NTFY_TOPIC          old route; used only while the two Telegram secrets
+#                       are not set
 #
 # The repo is public, so these runs are free. In a private repo this schedule
 # would use far more than the 2,000 free minutes a month.
@@ -55,12 +58,14 @@ jobs:
         run: node bridge-watch.js --once
         env:
           AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           # The feed hears each ship only about once a minute here, so listen
           # long enough to catch every ship and its length broadcast.
           LISTEN_SECONDS: 270
-          # Runs can start late, so schedule alerts for ships up to
-          # 60 + 30 minutes from the bridge.
+          # Runs can start late, so alert for ships up to 60 + 30 minutes
+          # from the bridge.
           LOOKAHEAD_MINUTES: 30
 
       - uses: actions/cache/save@v4

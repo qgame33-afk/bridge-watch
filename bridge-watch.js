@@ -4,8 +4,15 @@
  * Ambassador Bridge ship watcher.
  *
  * Reads live AIS ship positions (aisstream.io) for the Detroit River and Lake
- * St. Clair and sends an ntfy notification about an hour before a large ship
+ * St. Clair and sends a phone notification about an hour before a large ship
  * passes under the Ambassador Bridge, saying which direction it is coming from.
+ *
+ * Notifications go to a Telegram bot when TELEGRAM_BOT_TOKEN and
+ * TELEGRAM_CHAT_ID are set, otherwise to ntfy. Telegram cannot hold a message
+ * for later, so a Telegram alert is sent as soon as the ship is within the
+ * alert window (60 to 90 minutes from the bridge on the cloud schedule) and
+ * says how many minutes away the ship is. ntfy alerts are held back so they
+ * arrive 60 minutes before the passage.
  *
  * Needs Node 22 or newer (built-in WebSocket and fetch). No packages.
  *
@@ -19,8 +26,8 @@
  *   node bridge-watch.js --selftest    check the timing logic with simulated ships
  *
  * Settings come from config.json, or from environment variables in the cloud:
- * AISSTREAM_API_KEY, NTFY_TOPIC, NTFY_SERVER, MIN_LENGTH_M, LEAD_MINUTES,
- * LISTEN_SECONDS, LOOKAHEAD_MINUTES.
+ * AISSTREAM_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, NTFY_TOPIC,
+ * NTFY_SERVER, MIN_LENGTH_M, LEAD_MINUTES, LISTEN_SECONDS, LOOKAHEAD_MINUTES.
  */
 
 const fs = require('fs');
@@ -36,6 +43,10 @@ const DEFAULTS = {
   aisstreamApiKey: '',
   ntfyServer: 'https://ntfy.sh',
   ntfyTopic: '',
+  // Telegram bot token and the chat to send to. When both are set, alerts go
+  // to Telegram instead of ntfy.
+  telegramBotToken: '',
+  telegramChatId: '',
   // Alert for ships at least this long, in metres. Seaway-size ships are
   // 225.5 m and report as 225 or 226, so 227 means "bigger than Seaway-size".
   minLengthM: 227,
@@ -312,6 +323,8 @@ function loadConfig() {
   if (env.AISSTREAM_API_KEY) cfg.aisstreamApiKey = env.AISSTREAM_API_KEY;
   if (env.NTFY_TOPIC) cfg.ntfyTopic = env.NTFY_TOPIC;
   if (env.NTFY_SERVER) cfg.ntfyServer = env.NTFY_SERVER;
+  if (env.TELEGRAM_BOT_TOKEN) cfg.telegramBotToken = env.TELEGRAM_BOT_TOKEN;
+  if (env.TELEGRAM_CHAT_ID) cfg.telegramChatId = env.TELEGRAM_CHAT_ID;
   if (env.MIN_LENGTH_M) cfg.minLengthM = Number(env.MIN_LENGTH_M);
   if (env.LEAD_MINUTES) cfg.leadMinutes = Number(env.LEAD_MINUTES);
   return cfg;
@@ -320,7 +333,7 @@ function loadConfig() {
 function requireSettings(cfg) {
   const missing = [];
   if (!cfg.aisstreamApiKey) missing.push('the aisstream.io API key (AISSTREAM_API_KEY, or "aisstreamApiKey" in config.json)');
-  if (!cfg.ntfyTopic) missing.push('the ntfy topic (NTFY_TOPIC, or run: node bridge-watch.js --init)');
+  if (!usesTelegram(cfg) && !cfg.ntfyTopic) missing.push('where to send alerts (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or NTFY_TOPIC, or run: node bridge-watch.js --init)');
   if (typeof WebSocket === 'undefined') missing.push('Node 22 or newer');
   if (missing.length) {
     console.error('Cannot start. Missing: ' + missing.join('; '));
@@ -340,8 +353,31 @@ function initConfig() {
   console.log(`ntfy topic: ${cfg.ntfyTopic}`);
 }
 
-// Send a notification. With `deliverAt` (ms), ntfy holds it until that time.
+function usesTelegram(cfg) {
+  return Boolean(cfg.telegramBotToken && cfg.telegramChatId);
+}
+
+// Send through the Telegram bot. Errors never include the bot token.
+async function notifyTelegram(cfg, n) {
+  let res;
+  try {
+    res = await fetch(`https://api.telegram.org/bot${cfg.telegramBotToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: cfg.telegramChatId, text: `\u{1F6A2} ${n.title}\n\n${n.message}`, disable_web_page_preview: true }),
+    });
+  } catch {
+    throw new Error('could not reach Telegram');
+  }
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok || !out.ok) throw new Error(`Telegram answered ${res.status}: ${String(out.description || '').slice(0, 200)}`);
+  return out;
+}
+
+// Send a notification. With `deliverAt` (ms), ntfy holds it until that time;
+// Telegram always sends at once.
 async function notify(cfg, n, deliverAt) {
+  if (usesTelegram(cfg)) return notifyTelegram(cfg, n);
   if (!cfg.ntfyTopic) throw new Error('no ntfy topic set');
   const body = { topic: cfg.ntfyTopic, title: n.title, message: n.message, tags: n.tags, priority: n.priority || 4 };
   if (deliverAt && deliverAt - Date.now() > 30 * 1000) body.delay = String(Math.round(deliverAt / 1000));
@@ -481,7 +517,8 @@ async function runOnce() {
 
     const alert = { ...a, mmsi, name, length: shipLength(mmsi, c.length), seenAt: s.at };
     const arrival = s.at + a.etaMin * 60000;
-    const deliverAt = Math.max(now, arrival - cfg.leadMinutes * 60000);
+    // Telegram cannot hold a message, so it goes out now; ntfy holds it.
+    const deliverAt = usesTelegram(cfg) ? now : Math.max(now, arrival - cfg.leadMinutes * 60000);
     const n = formatAlert(alert, cfg, deliverAt);
     try {
       await notify(cfg, n, deliverAt);
@@ -491,7 +528,7 @@ async function runOnce() {
       const wait = Math.round((deliverAt - now) / 60000);
       log(`ALERT ${wait > 0 ? `scheduled in ${wait} min` : 'sent now'}: ${n.title} | ${n.message.replace(/\n/g, ' ')}`);
     } catch (e) {
-      log(`ntfy failed for ${name}: ${e.message}`);
+      log(`notification failed for ${name}: ${e.message}`);
     }
   }
 
@@ -606,7 +643,7 @@ function runForever() {
     const n = formatAlert(alert, cfg);
     log(`ALERT ${n.title} | ${n.message.replace(/\n/g, ' ')}`);
     notify(cfg, n).catch((e) => {
-      log(`ntfy failed (${e.message}); will retry on the next report`);
+      log(`notification failed (${e.message}); will retry on the next report`);
       ship.alertedAt = null;
     });
   }
@@ -760,6 +797,10 @@ function selftest() {
 
   const delayed = formatAlert({ direction: 'upbound', distNm: 14, etaMin: 78, sog: 10.4, name: 'TEST', length: 309, seenAt: 0 }, cfg, 18 * 60000);
   check('a held-back alert is worded for its delivery time', delayed.title === 'TEST: bridge in about 60 min', delayed.title);
+  const atOnce = formatAlert({ direction: 'upbound', distNm: 14, etaMin: 78, sog: 10.4, name: 'TEST', length: 309, seenAt: 0 }, cfg, 0);
+  check('an alert sent at once says how far away the ship is', atOnce.title === 'TEST: bridge in about 78 min', atOnce.title);
+  check('Telegram is used only when both the token and the chat are set',
+    usesTelegram({ telegramBotToken: 'x', telegramChatId: '1' }) && !usesTelegram({ telegramBotToken: 'x', telegramChatId: '' }) && !usesTelegram({}));
 
   console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
   process.exit(failures ? 1 : 0);
