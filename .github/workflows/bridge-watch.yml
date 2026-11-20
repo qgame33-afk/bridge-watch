@@ -15,6 +15,11 @@ on:
   schedule:
     - cron: '7,37 * * * *'
   workflow_dispatch:
+    inputs:
+      probe:
+        description: 'Diagnostic: listen for 2 minutes and list the ships heard (sends no alerts)'
+        type: boolean
+        default: false
 
 concurrency:
   group: bridge-watch
@@ -26,7 +31,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +46,14 @@ jobs:
           key: ships-cache-${{ github.run_id }}
           restore-keys: ships-cache-
 
-      - run: node bridge-watch.js --once
+      - if: ${{ inputs.probe }}
+        run: node bridge-watch.js --probe
+        env:
+          AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
+          LISTEN_SECONDS: 120
+
+      - if: ${{ !inputs.probe }}
+        run: node bridge-watch.js --once
         env:
           AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}

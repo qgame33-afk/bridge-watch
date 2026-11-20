@@ -502,8 +502,66 @@ async function runOnce() {
   }
   fs.writeFileSync(CACHE_PATH, JSON.stringify(cache));
 
+  if (!stats.confirmed) log('warning: aisstream.io never confirmed the subscription');
   log(`done: ${stats.messages} messages, ${seen.size} ships seen, ${large.length} large${large.length ? ': ' + large.join(', ') : ''}; ${sent} alert(s)`);
   process.exit(0);
+}
+
+// ---------------------------------------------------------- probe mode ----
+
+// Diagnostic: how much does the feed actually hear, here and across the
+// Great Lakes? Sends nothing to ntfy.
+function runProbe() {
+  const cfg = loadConfig();
+  if (!cfg.aisstreamApiKey) { console.error('No API key.'); process.exit(1); }
+  const seconds = Number(process.env.LISTEN_SECONDS) || 120;
+  const LAKES = [[49.0, -93.0], [41.0, -76.0]];
+  const inLocal = (lat, lon) => lat <= BOUNDING_BOX[0][0] && lat >= BOUNDING_BOX[1][0] && lon >= BOUNDING_BOX[0][1] && lon <= BOUNDING_BOX[1][1];
+  const byType = {};
+  const local = new Map();
+  const lakes = new Map();
+  let confirmed = false;
+  let opened = false;
+  const ws = new WebSocket(STREAM_URL);
+  ws.binaryType = 'arraybuffer';
+  const finish = (why) => {
+    console.log(`\nProbe finished (${why}) after listening up to ${seconds} s`);
+    console.log(`connection opened: ${opened}; subscription confirmed: ${confirmed}`);
+    console.log(`messages by type: ${JSON.stringify(byType)}`);
+    console.log(`ships heard in the bridge area: ${local.size}`);
+    for (const [mmsi, s] of local) console.log(`  ${s.name || mmsi}  ${s.lat.toFixed(3)}, ${s.lon.toFixed(3)}  ${s.sog ?? '?'} kn  (${s.n} reports)`);
+    console.log(`ships heard elsewhere on the Great Lakes: ${lakes.size}`);
+    for (const [mmsi, s] of [...lakes].slice(0, 25)) console.log(`  ${s.name || mmsi}  ${s.lat.toFixed(2)}, ${s.lon.toFixed(2)}`);
+    process.exit(0);
+  };
+  ws.addEventListener('open', () => {
+    opened = true;
+    ws.send(JSON.stringify({ APIKey: cfg.aisstreamApiKey, BoundingBoxes: [BOUNDING_BOX, LAKES] }));
+  });
+  ws.addEventListener('message', (ev) => {
+    let msg;
+    try { msg = decodeFrame(ev.data); } catch { return; }
+    if (msg.error) { console.log(`aisstream error: ${msg.error}`); return; }
+    if (msg.MessageType === 'SubscriptionConfirmation') { confirmed = true; return; }
+    byType[msg.MessageType] = (byType[msg.MessageType] || 0) + 1;
+    const meta = msg.MetaData || {};
+    const lat = meta.Latitude ?? meta.latitude;
+    const lon = meta.Longitude ?? meta.longitude;
+    const mmsi = Number(meta.MMSI);
+    if (!mmsi || typeof lat !== 'number' || typeof lon !== 'number') return;
+    const body = (msg.Message && msg.Message[msg.MessageType]) || {};
+    const map = inLocal(lat, lon) ? local : lakes;
+    const s = map.get(mmsi) || { n: 0 };
+    s.n++;
+    s.name = (meta.ShipName || '').trim() || s.name;
+    s.lat = lat;
+    s.lon = lon;
+    if (typeof body.Sog === 'number') s.sog = body.Sog;
+    map.set(mmsi, s);
+  });
+  ws.addEventListener('error', () => console.log('connection error'));
+  ws.addEventListener('close', (ev) => finish(`connection closed, code ${ev.code}`));
+  setTimeout(() => finish('time up'), seconds * 1000);
 }
 
 // ------------------------------------------------------ real-time mode ----
@@ -723,6 +781,8 @@ if (arg === '--init') {
   }).then(() => console.log('Test notification sent.'), (e) => { console.error(`Failed: ${e.message}`); process.exit(1); });
 } else if (arg === '--once') {
   runOnce();
+} else if (arg === '--probe') {
+  runProbe();
 } else {
   runForever();
 }
