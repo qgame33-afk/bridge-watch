@@ -5,8 +5,8 @@ passes under the Ambassador Bridge (Detroit / Windsor), saying which direction
 it is coming from.
 
 Ship positions come from the free [aisstream.io](https://aisstream.io) feed.
-A GitHub Actions schedule runs `bridge-watch.js --once` twice an hour: it
-listens to the feed for 25 seconds, works out each large ship's time to the
+A GitHub Actions schedule runs `bridge-watch.js --once` every 10 minutes: it
+listens to the feed for about four and a half minutes, works out each large ship's time to the
 bridge, and asks ntfy to deliver the alert 60 minutes before that time.
 
 ## Setup
@@ -27,8 +27,8 @@ locally.
 |---|---|---|
 | `MIN_LENGTH_M` | 227 | Smallest ship to alert on, in metres. Seaway-size ships report 225 or 226. |
 | `LEAD_MINUTES` | 60 | How long before the bridge the alert arrives. |
-| `LISTEN_SECONDS` | 25 in the cloud | How long each check listens to the feed. |
-| `LOOKAHEAD_MINUTES` | 40 in the cloud | How far past the lead time alerts are scheduled, to cover late runs. |
+| `LISTEN_SECONDS` | 270 in the cloud | How long each check listens to the feed. |
+| `LOOKAHEAD_MINUTES` | 30 in the cloud | How far past the lead time alerts are scheduled, to cover late runs. |
 
 ## Running it yourself
 
