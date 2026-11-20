@@ -1,7 +1,16 @@
 name: Bridge watch
 
-# Checks ship positions every 10 minutes and sends a phone alert for any
+# Watches ship positions around the clock and sends a phone alert for any
 # large ship about an hour from the Ambassador Bridge.
+#
+# How it keeps running: one run scans for ships back to back for about five
+# and a half hours, then starts the next run itself ("chain"). GitHub's own
+# schedule is not reliable enough for this (it skipped most 10-minute runs),
+# so the schedule below is only a safety net: twice an hour it checks whether
+# a run is already going and starts one if not.
+#
+# To stop the watcher: Actions > Bridge watch > "..." > Disable workflow,
+# then cancel the run in progress.
 #
 # Repository secrets (Settings > Secrets and variables > Actions):
 #   AISSTREAM_API_KEY   the free key from aisstream.io
@@ -10,12 +19,12 @@ name: Bridge watch
 #   NTFY_TOPIC          old route; used only while the two Telegram secrets
 #                       are not set
 #
-# The repo is public, so these runs are free. In a private repo this schedule
-# would use far more than the 2,000 free minutes a month.
+# The repo is public, so these runs are free. In a private repo this would
+# use far more than the 2,000 free minutes a month.
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '7,37 * * * *'
   workflow_dispatch:
     inputs:
       probe:
@@ -26,18 +35,48 @@ on:
         description: 'Send one test notification to the phone and stop'
         type: boolean
         default: false
-
-concurrency:
-  group: bridge-watch
-  cancel-in-progress: false
+      chain:
+        description: 'Leave unticked. Set by the watcher when it starts its own next run.'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
-  check:
+  # Decides whether this run should watch. A run started by the schedule
+  # stops here if another run is already going.
+  gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 3
+    outputs:
+      go: ${{ steps.decide.outputs.go }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          go=true
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            others=$(gh api "repos/${{ github.repository }}/actions/workflows/bridge-watch.yml/runs?per_page=30" \
+              --jq '[.workflow_runs[] | select(.id != ${{ github.run_id }}) | select(.status != "completed")] | length' || true)
+            echo "other runs not yet finished: ${others:-unknown}"
+            if [ -n "$others" ] && [ "$others" != "0" ]; then go=false; fi
+          fi
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: gate
+    if: ${{ needs.gate.outputs.go == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    # Only one watcher at a time. The next run in the chain waits here for
+    # the few seconds until the previous one has finished. Manual probe and
+    # test runs have their own group so they do not wait behind the watcher.
+    concurrency:
+      group: bridge-watch-${{ (inputs.probe || inputs.test_notify) && 'manual' || 'watch' }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -65,8 +104,14 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
 
+      # Scan for ships back to back for five and a half hours. A scan that
+      # fails (for example the ship feed is down) is retried after a pause.
       - if: ${{ !inputs.probe && !inputs.test_notify }}
-        run: node bridge-watch.js --once
+        run: |
+          end=$(( $(date +%s) + 330 * 60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            node bridge-watch.js --once || sleep 60
+          done
         env:
           AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -75,12 +120,19 @@ jobs:
           # The feed hears each ship only about once a minute here, so listen
           # long enough to catch every ship and its length broadcast.
           LISTEN_SECONDS: 270
-          # Runs can start late, so alert for ships up to 60 + 30 minutes
-          # from the bridge.
-          LOOKAHEAD_MINUTES: 30
+          # Scans follow each other every five minutes or so, so alert for
+          # ships up to 60 + 10 minutes from the bridge.
+          LOOKAHEAD_MINUTES: 10
 
       - uses: actions/cache/save@v4
         if: always()
         with:
           path: ships-cache.json
           key: ships-cache-${{ github.run_id }}
+
+      # Start the next run in the chain. Skipped for probe and test runs, and
+      # when this run was cancelled by hand.
+      - if: ${{ !cancelled() && !inputs.probe && !inputs.test_notify }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bridge-watch.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}" -f chain=true

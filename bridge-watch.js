@@ -10,7 +10,7 @@
  * Notifications go to a Telegram bot when TELEGRAM_BOT_TOKEN and
  * TELEGRAM_CHAT_ID are set, otherwise to ntfy. Telegram cannot hold a message
  * for later, so a Telegram alert is sent as soon as the ship is within the
- * alert window (60 to 90 minutes from the bridge on the cloud schedule) and
+ * alert window (60 to 70 minutes from the bridge on the cloud watcher) and
  * says how many minutes away the ship is. ntfy alerts are held back so they
  * arrive 60 minutes before the passage.
  *
