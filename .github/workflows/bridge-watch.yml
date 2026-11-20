@@ -22,6 +22,10 @@ on:
         description: 'Diagnostic: listen for 2 minutes and list the ships heard (sends no alerts)'
         type: boolean
         default: false
+      test_notify:
+        description: 'Send one test notification to the phone and stop'
+        type: boolean
+        default: false
 
 concurrency:
   group: bridge-watch
@@ -54,7 +58,14 @@ jobs:
           AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
           LISTEN_SECONDS: 120
 
-      - if: ${{ !inputs.probe }}
+      - if: ${{ inputs.test_notify }}
+        run: node bridge-watch.js --test-notify
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+
+      - if: ${{ !inputs.probe && !inputs.test_notify }}
         run: node bridge-watch.js --once
         env:
           AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
