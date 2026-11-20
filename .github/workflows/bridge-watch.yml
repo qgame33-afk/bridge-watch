@@ -1,0 +1,57 @@
+name: Bridge watch
+
+# Checks ship positions twice an hour and schedules an ntfy alert for any
+# large ship about an hour from the Ambassador Bridge.
+#
+# Needs two repository secrets (Settings > Secrets and variables > Actions):
+#   AISSTREAM_API_KEY  the free key from aisstream.io
+#   NTFY_TOPIC         the ntfy topic the phone is subscribed to
+#
+# A private repo gets 2,000 free minutes a month and every run is billed as
+# at least one minute. Twice an hour is about 1,450 minutes a month, as long
+# as each run stays under a minute, so keep LISTEN_SECONDS short.
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: bridge-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Ship lengths and recent alerts carry over from the previous run.
+      - uses: actions/cache/restore@v4
+        with:
+          path: ships-cache.json
+          key: ships-cache-${{ github.run_id }}
+          restore-keys: ships-cache-
+
+      - run: node bridge-watch.js --once
+        env:
+          AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          LISTEN_SECONDS: 25
+          # Runs are 30 minutes apart and can start late, so schedule alerts
+          # for ships up to 60 + 40 minutes from the bridge.
+          LOOKAHEAD_MINUTES: 40
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ships-cache.json
+          key: ships-cache-${{ github.run_id }}
